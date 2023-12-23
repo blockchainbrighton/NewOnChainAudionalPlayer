@@ -1,4 +1,4 @@
-// index_v2.1.1.js
+// index_v2.1.1.1.js
 
 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 if (!audioContext) {
@@ -18,15 +18,9 @@ const customLog = (message, isError = false) => {
 
 // Function to convert base64 to an array buffer
 function base64ToArrayBuffer(base64) {
-    console.log('base64ToArrayBuffer entered');
-    const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes.buffer;
+    return Uint8Array.from(atob(base64), c => c.charCodeAt(0)).buffer;
 }
+
 
 // Function to decode audio data
 const decodeAudioData = (audioData) => {
@@ -36,43 +30,49 @@ const decodeAudioData = (audioData) => {
     });
 };
 
-// Updated loadAudioFile to handle base64 encoded audio in JSON files
+// Improved and optimized loadAudioFile function
 const loadAudioFile = async (url) => {
     console.log('loadAudioFile entered...');
     if (!url) {
-        customLog('Encountered invalid or missing URL in JSON', true);
+        customLog('Encountered invalid or missing URL', true);
         return null;
     }
 
     try {
         const response = await fetch(url);
         const contentType = response.headers.get('content-type');
-        let audioData;
 
         if (contentType.includes('audio/')) {
             customLog(`Loading direct audio file with type: ${contentType}`);
-            audioData = await response.arrayBuffer();
+            return processAudioFile(response);
         } else if (contentType.includes('application/json')) {
             customLog(`Loading a JSON file that might contain audio data: ${contentType}`);
-            const jsonData = await response.json();
-            if (jsonData.audioData && typeof jsonData.audioData === 'string') {
-                // Log the base64 audio data
-                console.log('Found base64 audio data:', jsonData.audioData);
-                // Decode base64 to ArrayBuffer
-                audioData = base64ToArrayBuffer(jsonData.audioData.split(',')[1]);
-            } else {
-                customLog('JSON does not contain base64 encoded audio data', true);
-                return null;
-            }
+            return processJsonFile(response);
         } else {
             customLog(`Unknown content type: ${contentType}`, true);
             return null;
         }
-
-        // Decode and return the audio data
-        return await decodeAudioData(audioData);
     } catch (error) {
         customLog(`Error loading audio file: ${error}`, true);
+        return null;
+    }
+};
+
+// Handles direct audio files
+const processAudioFile = async (response) => {
+    const audioData = await response.arrayBuffer();
+    return decodeAudioData(audioData);
+};
+
+// Handles JSON files containing base64 encoded audio
+const processJsonFile = async (response) => {
+    const jsonData = await response.json();
+    if (jsonData.audioData && typeof jsonData.audioData === 'string') {
+        console.log('Found base64 audio data:', jsonData.audioData);
+        const audioData = base64ToArrayBuffer(jsonData.audioData.split(',')[1]);
+        return decodeAudioData(audioData);
+    } else {
+        customLog('JSON does not contain base64 encoded audio data', true);
         return null;
     }
 };
@@ -115,46 +115,64 @@ const schedulePlaybackForStep = (audioBuffer, trimSetting, stepIndex) => {
     createAndStartAudioSource(audioBuffer, trimSetting, playbackTime);
 };
 
+// Optimized playAudio function
 const playAudio = async () => {
-    if (!sequenceData || !sequenceData.projectURLs || !sequenceData.projectSequences) {
+    if (!validateSequenceData(sequenceData)) {
         return customLog("No valid sequence data available. Cannot play audio.", true);
     }
     const { projectURLs, projectSequences, projectBPM, trimSettings } = sequenceData;
     BPM = projectBPM; // Set global BPM
 
-    stopAudio();  // Ensure any previous playback is stopped before starting new
+    stopAudio();  // Ensure any previous playback is stopped
 
-    cumulativeOffset = 0;  // Reset cumulative offset at the beginning of each full loop
+    cumulativeOffset = 0;  // Reset cumulative offset
 
-    // Load audio buffers for each URL and store them in an array
-    // This line ensures 'audioBuffers' is defined within the function's scope
-    const audioBuffers = await Promise.all(projectURLs.map(loadAudioFile));
-
-    if (!audioBuffers.some(buffer => buffer)) {
+    const audioBuffers = await loadAudioBuffers(projectURLs);
+    if (!isValidAudioBuffers(audioBuffers)) {
         return customLog("No valid audio data available for any channel. Cannot play audio.", true);
     }
 
-    Object.entries(projectSequences).forEach(([sequenceName, channels]) => {
-        // Calculate the total duration of the current sequence
+    scheduleSequences(projectSequences, audioBuffers, trimSettings);
+
+    handlePlaybackCompletion();
+};
+
+const validateSequenceData = (data) => {
+    return data && data.projectURLs && data.projectSequences;
+};
+
+const loadAudioBuffers = async (urls) => {
+    return Promise.all(urls.map(loadAudioFile));
+};
+
+const isValidAudioBuffers = (buffers) => {
+    return buffers.some(buffer => buffer);
+};
+
+const scheduleSequences = (sequences, audioBuffers, trimSettings) => {
+    Object.entries(sequences).forEach(([sequenceName, channels]) => {
         const sequenceDuration = 64 * calculateStepTime();
-
-        Object.entries(channels).forEach(([channelName, channelData], channelIndex) => {
-            const steps = channelData.steps;
-            const audioBuffer = audioBuffers[channelIndex];  // Ensure 'audioBuffers' is accessible here
-            const trimSetting = trimSettings[channelIndex];
-
-            if (audioBuffer && steps) {
-                steps.forEach((active, stepIndex) => {
-                    if (active) {
-                        schedulePlaybackForStep(audioBuffer, trimSetting, stepIndex);
-                    }
-                });
-            }
-        });
-
-        cumulativeOffset += sequenceDuration;  // Increment cumulativeOffset after each sequence
+        scheduleChannels(channels, audioBuffers, trimSettings);
+        cumulativeOffset += sequenceDuration;  // Increment cumulativeOffset
     });
+};
 
+const scheduleChannels = (channels, audioBuffers, trimSettings) => {
+    Object.entries(channels).forEach(([channelName, channelData], channelIndex) => {
+        const steps = channelData.steps;
+        const audioBuffer = audioBuffers[channelIndex];
+        const trimSetting = trimSettings[channelIndex];
+        if (audioBuffer && steps) {
+            steps.forEach((active, stepIndex) => {
+                if (active) {
+                    schedulePlaybackForStep(audioBuffer, trimSetting, stepIndex);
+                }
+            });
+        }
+    });
+};
+
+const handlePlaybackCompletion = () => {
     isStoppedManually = false;
     customLog("Scheduled playback for active steps in available sequences and channels");
     if (activeSources.size === 0 && isLooping) {
@@ -182,6 +200,7 @@ const setupUIHandlers = () => {
 
     if (playButton) {
         playButton.addEventListener('click', () => {
+            
             isLooping = true;
             customLog('Play button pressed, attempting to start playback.');
             playAudio();
